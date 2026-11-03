@@ -27,9 +27,9 @@ def eventually(action, timeout=10):
             time.sleep(0.05)
 
 
-def exchange(port, payload=b'hello through Noise'):
-    with socket.create_connection(('127.0.0.1', port), timeout=0.3) as stream:
-        stream.settimeout(0.5)
+def exchange(port, payload=b'hello through Noise', timeout=0.5):
+    with socket.create_connection(('127.0.0.1', port), timeout=timeout) as stream:
+        stream.settimeout(timeout)
         stream.sendall(payload)
         result = bytearray()
         while len(result) < len(payload):

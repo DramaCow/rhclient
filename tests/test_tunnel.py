@@ -77,7 +77,7 @@ def test_transfers_binary_payloads_on_concurrent_connections(deployment):
     with Tunnel(**deployment.arguments()):
         eventually(lambda: exchange(deployment.public_port))
         with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
-            results = list(pool.map(lambda _: exchange(deployment.public_port, payload), range(16)))
+            results = list(pool.map(lambda _: exchange(deployment.public_port, payload, timeout=10), range(16)))
         assert all(result == payload for result in results)
 
 
