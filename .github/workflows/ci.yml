@@ -1,0 +1,148 @@
+name: CI and Linux wheels
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+env:
+  RUSTUP_TOOLCHAIN: 1.94.0
+  CARGO_TERM_COLOR: always
+
+jobs:
+  checks:
+    name: Format and lint
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: '3.12'
+      - name: Install toolchains
+        run: |
+          rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --component rustfmt --component clippy
+          python -m venv .venv
+          .venv/bin/python -m pip install ruff==0.14.3
+      - name: Check Rust
+        run: |
+          cargo fmt -- --check
+          PYO3_PYTHON="$PWD/.venv/bin/python" cargo clippy --locked -- -D warnings
+      - name: Check Python
+        run: .venv/bin/ruff check python tests
+      - name: Verify release version
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          .venv/bin/python - <<'PY'
+          import os, pathlib, tomllib
+          python = tomllib.loads(pathlib.Path('pyproject.toml').read_text())['project']['version']
+          rust = tomllib.loads(pathlib.Path('Cargo.toml').read_text())['package']['version']
+          assert os.environ['RELEASE_TAG'] == 'v' + python == 'v' + rust, 'Release tag and package versions differ'
+          PY
+
+  wheels:
+    name: Linux ${{ matrix.arch }} wheel and integration tests
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+      - name: Build portable wheel
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b
+        with:
+          target: ${{ matrix.target }}
+          rust-toolchain: '1.94.0'
+          maturin-version: v1.16.0
+          manylinux: '2014'
+          args: --release --locked --strip --out dist --interpreter /opt/python/cp311-cp311/bin/python
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        id: py11
+        with:
+          python-version: '3.11'
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        id: py12
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        id: py13
+        with:
+          python-version: '3.13'
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        id: py14
+        with:
+          python-version: '3.14'
+      - name: Build independent upstream test server
+        run: |
+          rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal
+          export RATHOLE_FIXTURE_DIR="$RUNNER_TEMP/upstream-rathole"
+          printf 'RATHOLE_FIXTURE_DIR=%s\n' "$RATHOLE_FIXTURE_DIR" >> "$GITHUB_ENV"
+          sh scripts/build-test-server.sh
+      - name: Test installed wheel on Python 3.11 through 3.14
+        env:
+          PYTHON_311: ${{ steps.py11.outputs.python-path }}
+          PYTHON_312: ${{ steps.py12.outputs.python-path }}
+          PYTHON_313: ${{ steps.py13.outputs.python-path }}
+          PYTHON_314: ${{ steps.py14.outputs.python-path }}
+        run: |
+          export RATHOLE_BIN="$RATHOLE_FIXTURE_DIR/target/release/rathole"
+          for executable in "$PYTHON_311" "$PYTHON_312" "$PYTHON_313" "$PYTHON_314"; do
+            environment=$(mktemp -d "$RUNNER_TEMP/rhclient-python-XXXXXXXX")
+            "$executable" -m venv "$environment"
+            "$environment/bin/python" -m pip install --only-binary :all: \
+              dist/*.whl 'pytest==9.2.0' 'pytest-timeout==2.4.0'
+            (cd "$RUNNER_TEMP" && "$environment/bin/python" -m pytest "$GITHUB_WORKSPACE/tests" -q)
+          done
+      - name: Upload tested wheel
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: rhclient-linux-${{ matrix.arch }}
+          path: dist/*.whl
+          if-no-files-found: error
+
+  release:
+    name: Release tested Linux wheels
+    needs: [checks, wheels]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0
+        with:
+          pattern: rhclient-linux-*
+          merge-multiple: true
+          path: dist
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          test "$(find dist -name '*.whl' | wc -l)" -eq 2
+          (cd dist && sha256sum ./*.whl > SHA256SUMS)
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" dist/*.whl dist/SHA256SUMS --clobber
+          else
+            gh release create "$RELEASE_TAG" --verify-tag --generate-notes \
+              --title "rhclient $RELEASE_TAG" dist/*.whl dist/SHA256SUMS
+          fi

@@ -1,0 +1,24 @@
+[build-system]
+requires = ["maturin>=1.12,<2"]
+build-backend = "maturin"
+
+[project]
+name = "rhclient"
+version = "0.1.0"
+requires-python = ">=3.11"
+classifiers = ["Operating System :: POSIX :: Linux", "Programming Language :: Python :: 3"]
+
+[project.urls]
+Repository = "https://github.com/DramaCow/rhclient"
+
+[project.optional-dependencies]
+dev = ["pytest==9.2.0", "pytest-timeout==2.4.0", "maturin==1.16.0", "ruff==0.14.3"]
+
+[tool.maturin]
+python-source = "python"
+module-name = "rhclient._native"
+features = ["pyo3/extension-module"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+timeout = 30
